@@ -11,53 +11,94 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-const STATIC_ROOM = "050BBB66HH";
-const ROOM_TTL_MS = 2 * 60 * 1000;
-let username = localStorage.getItem("chat_username");
-let roomCode = "";
-let clientId = generateClientId();
+let roomCode = null;
+let clientId = "_" + Math.random().toString(36).substr(2, 9);
 let lastActivity = Date.now();
 let typingTimeout;
+let gr8stg = "";
+const STATIC_ROOM = "050BBB66HH";
+const MAX_MESSAGES = 500;
 
+// AUDIO setup
+const sound = new Audio("https://notificationsounds.com/notification-sounds/eventually-590/download/mp3");
+sound.volume = 0.3;
+
+// INIT
 window.onload = () => {
-    cleanupOldRooms();
-    setupSidebarBackHandler();
-    initUsernameFlow();
-  };  
-  
-  function initUsernameFlow() {
-    const stored = localStorage.getItem("chat_username");
-  
-    if (!stored) {
-      username = null;
-      showScreen("usernameScreen");
-    } else {
-      username = stored;
-      document.getElementById("namePreview").innerText = username;
-      showScreen("roomChoiceScreen");
-    }
-  }   
+  cleanupOldRooms();
+  setupSidebarBackHandler();
+  initUsernameFlow();
+  setupVisibilityAttention();
+};
 
-  function saveUsername() {
-    const input = document.getElementById("usernameInput").value.trim();
-    if (!input) return alert("Please enter a valid name");
-  
-    username = input;
-    localStorage.setItem("chat_username", username);
-    initUsernameFlow(); // go back into proper flow
-  }  
+function sanitizeUsername(name) {
+  return name.replace(/[.#$\[\]]/g, "_");
+}
+function submitProfile() {
+  const name = document.getElementById("profileUsernameInput").value.trim();
+  const desc = document.getElementById("profileDescriptionInput").value.trim();
+  const error = document.getElementById("profileError");
+
+  if (!name) {
+    error.style.display = "block";
+    return;
+  }
+
+  error.style.display = "none";
+  username = name;
+  const timestamp = Date.now();
+  const sanitized = sanitizeUsername(name);
+
+  // Save in Firebase user profile
+  const profileRef = db.ref(`profiles/${sanitized}`);
+  profileRef.get().then(snap => {
+    const data = snap.val() || {};
+    const history = data.usernameHistory || [];
+
+    // Only add to history if changed
+    if (!history.includes(name)) history.push(name);
+
+    profileRef.set({
+      username: name,
+      description: desc,
+      lastChanged: timestamp,
+      usernameHistory: history
+    });
+
+    localStorage.setItem("chat_username", name);
+    localStorage.setItem("profile_description", desc);
+
+    document.getElementById("namePreview").innerText = username;
+    showScreen("roomChoiceScreen");
+  });
+}
+function saveUsername() {
+  const input = document.getElementById("usernameInput").value.trim();
+  if (!input) return alert("Please enter a valid name");
+
+  username = input;
+  localStorage.setItem("chat_username", username);
+  initUsernameFlow();
+}
 
 function generateRoom() {
   roomCode = genRoomCode();
   db.ref("rooms/" + roomCode).set({ active: true, created: Date.now() });
   startChat();
 }
-
 function joinRoom() {
-  roomCode = document.getElementById("roomCodeInput").value.trim().toUpperCase();
-  if (!roomCode) return alert("Enter a valid room code");
+  const inputCode = (roomCode || document.getElementById("roomCodeInput").value.trim().toUpperCase());
+  if (!inputCode) return alert("Enter a valid room code");
+  roomCode = inputCode;
 
-  db.ref("rooms/" + roomCode).get().then((snap) => {
+  // Static room flow → show password screen first
+  if (roomCode === STATIC_ROOM) {
+    showScreen("passwordScreen");
+    return;
+  }
+
+  // Regular room
+  db.ref("rooms/" + roomCode).get().then(snap => {
     if (snap.exists() && snap.val().active !== false) {
       startChat();
     } else {
@@ -65,113 +106,42 @@ function joinRoom() {
     }
   });
 }
-
-function joinGlobalRoom() {
-  roomCode = "050BBB66HH";
-  db.ref("rooms/" + roomCode).set({ active: true, created: Date.now() });
-  startChat();
-}
-
 function startChat() {
+  if (!roomCode || !username) {
+    alert("Missing room or user information.");
+    return showScreen("roomChoiceScreen");
+  }
+
   showScreen("chatScreen");
   document.getElementById("userDisplay").innerText = username;
-  document.getElementById("roomDisplay").innerText = roomCode;
+  if(roomCode = "050BBB66HH")
+  {
+    document.getElementById("roomDisplay").innerText = "No room code available for private rooms";
+  }
+  else
+  {
+    document.getElementById("roomDisplay").innerText = roomCode;
+  }
   listenForMessages();
   listenForTyping();
   startInactivityTimer();
   trackPresence();
   listenForUserList();
-  logSystemMessage(`${username} joined the room`);
-  window.addEventListener('beforeunload', () => {
-    logSystemMessage(`${username} left the room`);
-  });
 }
-function trackPresence() {
-    if (!username || !roomCode) return;
-  
-    const userKey = sanitizeUsername(username);
-    const userRef = db.ref(`users/${roomCode}/${userKey}`);
-  
-    const data = {
-      username,
-      lastOnline: firebase.database.ServerValue.TIMESTAMP,
-      online: true
-    };
-  
-    userRef.set(data);
-    userRef.onDisconnect().update({
-      online: false,
-      lastOnline: Date.now()
-    });
-  }  
-  
-  function listenForUserList() {
-    db.ref(`users/${roomCode}`).on("value", (snapshot) => {
-      const users = snapshot.val() || {};
-      const now = Date.now();
-      const html = Object.values(users)
-        .filter(user => user.username)
-        .map(user => {
-          const isOnline = user.online;
-          const recentlySeen = now - user.lastOnline <= 30 * 60 * 1000;
-          if (!isOnline && !recentlySeen) return '';
-  
-          const color = isOnline ? "#00ff88" : "#888";
-          const status = isOnline ? "🟢" : "🕒";
-          return `<li style="color:${color}">${status} ${user.username}</li>`;
-        })
-        .join("");
-  
-      document.getElementById("userList").innerHTML = html;
-    });
-  }  
-function logSystemMessage(text) {
-  const key = db.ref().push().key;
-  db.ref(`rooms/${roomCode}/messages/${key}`).set({
-    msg: text,
-    sender: "System",
-    senderId: "system",
-    timestamp: Date.now()
-  });
-}
-function setupSidebarBackHandler() {
-    // Close sidebar on browser back
-    window.addEventListener("popstate", () => {
-      const sidebar = document.getElementById("userSidebar");
-      if (sidebar?.classList.contains("show")) {
-        sidebar.classList.remove("show");
-      }
-    });
-  }
-  
-  function toggleSidebar() {
-    const sidebar = document.getElementById("userSidebar");
-    if (!sidebar.classList.contains("show")) {
-      sidebar.classList.add("show");
-      history.pushState({ sidebarOpen: true }, "");
+
+function validateStaticRoomPassword() {
+  const entered = document.getElementById("staticPasswordInput").value;
+  const errorText = document.getElementById("passwordError");
+
+  db.ref("gr8stg").get().then(snap => {
+    const password = snap.val();
+    if (entered === password) {
+      errorText.style.display = "none";
+      startChat();
     } else {
-      sidebar.classList.remove("show");
-      if (history.state?.sidebarOpen) history.back();
-    }
-  }
-  
-document.addEventListener("DOMContentLoaded", () => {
-    const input = document.getElementById("msgInput");
-    if (input) {
-      input.addEventListener("keypress", function (e) {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          sendMessage();
-        }
-      });
+      errorText.style.display = "block";
     }
   });
-  
-function showScreen(id) {
-  ["usernameScreen", "roomChoiceScreen", "codeEntryScreen", "chatScreen"].forEach(screen => {
-    document.getElementById(screen).style.display = "none";
-  });
-  document.getElementById(id).style.display = "flex";
 }
 
 function sendMessage() {
@@ -186,6 +156,7 @@ function sendMessage() {
     senderId: clientId,
     timestamp: Date.now()
   });
+
   input.value = '';
   sendTyping(true);
   lastActivity = Date.now();
@@ -193,19 +164,22 @@ function sendMessage() {
 
 function listenForMessages() {
   const roomRef = db.ref(`rooms/${roomCode}/messages`);
-  const query = (roomCode === STATIC_ROOM)
-    ? roomRef.limitToLast(80)
-    : roomRef;
+  const query = roomRef.limitToLast(MAX_MESSAGES);
 
   query.on("child_added", (snap) => {
     const { msg, sender, senderId, timestamp } = snap.val();
     const sent = senderId === clientId;
-
     addMessage(msg, sender, timestamp, sent);
 
-    // Delete messages only for non-static rooms
+    // Only auto-delete in non-static rooms
     if (roomCode !== STATIC_ROOM) {
       db.ref(`rooms/${roomCode}/messages/${snap.key}`).remove();
+    }
+
+    // Notify
+    if (!sent) {
+      sound.play();
+      flagPageAttention();
     }
   });
 }
@@ -213,42 +187,48 @@ function listenForMessages() {
 function addMessage(text, sender, timestamp, sent) {
   const div = document.createElement("div");
   div.classList.add("msg", sent ? "sent" : "received");
+
   const time = new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   div.innerHTML = `<span class="sender-name">${sender}</span><br>${text}<small>${time}</small>`;
-  document.getElementById("messages").appendChild(div);
-  document.getElementById("messages").scrollTop = 99999;
+
+  const msgBox = document.getElementById("messages");
+  msgBox.appendChild(div);
+  msgBox.scrollTop = msgBox.scrollHeight;
+}
+function closeProfile() {
+  document.getElementById("profileViewer").style.display = "none";
 }
 
-function sendTyping(stop = false) {
-  if (stop) {
-    db.ref(`rooms/${roomCode}/typing/${clientId}`).remove();
-  } else {
-    db.ref(`rooms/${roomCode}/typing/${clientId}`).set(username);
-    clearTimeout(typingTimeout);
-    typingTimeout = setTimeout(() => {
-      db.ref(`rooms/${roomCode}/typing/${clientId}`).remove();
-    }, 3000);
-  }
-}
-
-function listenForTyping() {
-  const el = document.getElementById("typing");
-  db.ref(`rooms/${roomCode}/typing`).on("value", (snap) => {
-    const data = snap.val();
-    if (!data) return (el.innerText = "");
-    const others = Object.values(data).filter((name) => name !== username);
-    el.innerText = others.length ? `${others.join(", ")} typing...` : "";
+function cleanupOldRooms() {
+  db.ref("rooms").once("value").then(snapshot => {
+    const rooms = snapshot.val();
+    if (!rooms) return;
+    const now = Date.now();
+    for (const code in rooms) {
+      if (code === STATIC_ROOM) continue;
+      const room = rooms[code];
+      if (now - (room.created || 0) > 2 * 60 * 1000) {
+        db.ref("rooms/" + code).remove();
+      }
+    }
   });
 }
-
-function startInactivityTimer() {
-  setInterval(() => {
-    if (Date.now() - lastActivity > 5 * 60 * 1000) {
-      db.ref("rooms/" + roomCode).update({ active: false });
-      alert("Session expired.");
-      location.reload();
-    }
-  }, 30000);
+document.addEventListener("DOMContentLoaded", () => {
+  const input = document.getElementById("msgInput");
+  if (input) {
+    input.addEventListener("keypress", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+  }
+});
+function showScreen(id) {
+  ["usernameScreen", "roomChoiceScreen", "codeEntryScreen", "chatScreen", "passwordScreen", "profileScreen"].forEach(s => {
+    document.getElementById(s).style.display = "none";
+  });
+  document.getElementById(id).style.display = "flex";
 }
 
 function genRoomCode() {
@@ -258,28 +238,156 @@ function genRoomCode() {
   return get(digits, 3) + get(chars, 3) + get(digits, 2) + get(chars, 2);
 }
 
-function generateClientId() {
-  return '_' + Math.random().toString(36).substr(2, 9);
+function startInactivityTimer() {
+  setInterval(() => {
+    if (Date.now() - lastActivity > 5 * 60 * 1000 && roomCode !== STATIC_ROOM) {
+      db.ref("rooms/" + roomCode).update({ active: false });
+      alert("Session expired.");
+      location.reload();
+    }
+  }, 30000);
 }
-function cleanupOldRooms() {
-  db.ref("rooms").once("value").then(snapshot => {
-    const rooms = snapshot.val();
-    if (!rooms) return;
 
-    const now = Date.now();
-    Object.entries(rooms).forEach(([code, room]) => {
-      if (code === STATIC_ROOM) return;
-
-      const created = room.created || 0;
-      const isOld = now - created > ROOM_TTL_MS;
-
-      if (isOld) {
-        db.ref("rooms/" + code).remove();
-        console.log("🗑️ Deleted expired room:", code);
-      }
-    });
+function setupSidebarBackHandler() {
+  window.addEventListener("popstate", () => {
+    const sidebar = document.getElementById("userSidebar");
+    if (sidebar?.classList.contains("show")) {
+      sidebar.classList.remove("show");
+    }
   });
 }
-function sanitizeUsername(name) {
-    return name.replace(/[.#$\[\]]/g, "_");
+
+function toggleSidebar() {
+  const sidebar = document.getElementById("userSidebar");
+  if (!sidebar.classList.contains("show")) {
+    sidebar.classList.add("show");
+    history.pushState({ sidebarOpen: true }, "");
+  } else {
+    sidebar.classList.remove("show");
+    if (history.state?.sidebarOpen) history.back();
+  }
+}
+
+function setupVisibilityAttention() {
+  let unread = 0;
+  let originalTitle = document.title;
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      document.title = originalTitle;
+      unread = 0;
+    }
+  });
+
+  window.flagPageAttention = function () {
+    if (document.hidden) {
+      unread++;
+      document.title = `(${unread}) New message • ${originalTitle}`;
+    }
+  };
+}
+let username = null;
+function tryEditProfile() {
+  const sanitized = sanitizeUsername(username);
+  db.ref(`profiles/${sanitized}`).get().then(snap => {
+    const data = snap.val();
+    if (!data) return alert("Profile not found.");
+
+    const last = data.lastChanged || 0;
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+
+    if (now - last < oneDay) {
+      const left = Math.ceil((oneDay - (now - last)) / (60 * 1000));
+      alert(`You can change your profile again in ${left} minutes.`);
+    } else {
+      showScreen("profileScreen");
+      document.getElementById("profileUsernameInput").value = username;
+      document.getElementById("profileDescriptionInput").value = data.description || "";
+    }
+  });
+}
+
+function listenForUserList() {
+  db.ref(`users/${roomCode}`).on("value", snap => {
+    const users = snap.val() || {};
+    const now = Date.now();
+    const html = Object.values(users).map(user => {
+      const isOnline = user.online;
+      const seen = now - user.lastOnline <= 30 * 60 * 1000;
+      if (!isOnline && !seen) return "";
+
+      const color = isOnline ? "#00ff88" : "#888";
+      const status = isOnline ? "🟢" : "🕒";
+      const lastSeen = new Date(user.lastOnline).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return `<li style="color:${color};cursor:pointer;" onclick="viewProfile('${sanitizeUsername(user.username)}')">${status} ${user.username}</li>`;
+    }).join("");
+    document.getElementById("userList").innerHTML = html;
+  });
+}
+function sendTyping(stop = false) {
+  const path = `rooms/${roomCode}/typing/${clientId}`;
+  if (stop) {
+    db.ref(path).remove();
+  } else {
+    db.ref(path).set(username);
+    clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => {
+      db.ref(path).remove();
+    }, 3000);
+  }
+}
+
+function listenForTyping() {
+  const el = document.getElementById("typing");
+  db.ref(`rooms/${roomCode}/typing`).on("value", snap => {
+    const data = snap.val();
+    if (!data) return (el.innerText = "");
+    const others = Object.values(data).filter(name => name !== username);
+    el.innerText = others.length ? `${others.join(", ")} typing...` : "";
+  });
+}
+
+function trackPresence() {
+  if (!username || !roomCode) return;
+  const userKey = sanitizeUsername(username);
+  const userRef = db.ref(`users/${roomCode}/${userKey}`);
+
+  const data = {
+    username,
+    lastOnline: firebase.database.ServerValue.TIMESTAMP,
+    online: true
+  };
+
+  userRef.set(data);
+  userRef.onDisconnect().update({
+    online: false,
+    lastOnline: Date.now()
+  });
+}
+function viewProfile(userKey) {
+  db.ref(`profiles/${userKey}`).get().then(snap => {
+    if (!snap.exists()) return;
+    const p = snap.val();
+    const content = `
+Name: ${p.username}
+Description: ${p.description || "No bio set"}
+History:
+${(p.usernameHistory || []).join("\n")}
+Last Changed: ${new Date(p.lastChanged).toLocaleString()}
+    `.trim();
+    document.getElementById("profileContent").innerText = content;
+    document.getElementById("profileViewer").style.display = "block";
+  });
+}
+function initUsernameFlow() {
+  const stored = localStorage.getItem("chat_username");
+
+  if (!stored) {
+    showScreen("profileScreen");
+  } else {
+    username = stored;
+    document.getElementById("namePreview").innerText = username;
+    showScreen("roomChoiceScreen");
+  }
 }
